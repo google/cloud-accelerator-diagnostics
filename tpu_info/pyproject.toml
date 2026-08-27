@@ -13,7 +13,7 @@
 # limitations under the License.
 
 [build-system]
-requires = ["hatchling", "hatch-build-scripts", "grpcio-tools~=1.65.5"]
+requires = ["hatchling", "hatch-build-scripts", "grpcio-tools>=1.65.5"]
 build-backend = "hatchling.build"
 
 [project]
@@ -51,10 +51,12 @@ tpu-info = "tpu_info.cli:print_chip_info"
 [tool.hatch.build]
 exclude = [
   "*_test.py",
-  "*.proto",
 ]
 
 [tool.hatch.build.targets.wheel]
+exclude = [
+  "*.proto",
+]
 # HACK: Avoid copying files generated below
 # See https://github.com/rmorshea/hatch-build-scripts/discussions/4
 artifacts = [
