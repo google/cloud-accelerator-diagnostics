@@ -133,16 +133,6 @@ class TransferLatencyDistribution(typing.NamedTuple):
   p999: float
 
 
-# A schema defining the allowed filter keys for each metric.
-# The value is a set of valid filter keys.
-METRIC_FILTER_SCHEMA = {
-    "buffer_transfer_latency": {"percentile"},
-    "inbound_buffer_transfer_latency": {"percentile"},
-    "host_to_device_transfer_latency": {"percentile"},
-    "device_to_host_transfer_latency": {"percentile"},
-    "collective_e2e_latency": {"percentile"},
-    "host_compute_latency": {"percentile"},
-}
 
 LIBTPU_METRIC_MAP = {
     "buffer_transfer_latency": MetricName.BUFFER_TRANSFER_LATENCY_US.value,
@@ -365,32 +355,18 @@ METRIC_COLUMNS = immutabledict({
 })
 
 
-# A set of all valid metric names for quick lookup.
-VALID_METRICS = frozenset(
-    {
-        "hbm_usage",
-        "hlo_queue_size",
-        "hlo_exec_timing",
-        "duty_cycle_percent",
-        "tensorcore_utilization",
-        "buffer_transfer_latency",
-        "inbound_buffer_transfer_latency",
-        "host_to_device_transfer_latency",
-        "device_to_host_transfer_latency",
-        "collective_e2e_latency",
-        "host_compute_latency",
-        "grpc_tcp_min_rtt",
-        "grpc_tcp_delivery_rate",
-        "runtime_hbm_utilization",
-        "tensorcore_idle_duration",
-        "core_state",
-        "sequencer_state",
-        "sequencer_state_detailed",
-        "queued_programs",
-    }
-    | set(ORBAX_SHORT_TO_LONG_MAP.keys())
-    | set(PYGRAIN_SHORT_TO_LONG_MAP.keys())
-)
+def __getattr__(name: str):
+  if name == "VALID_METRICS":
+    # pytype: disable=import-error
+    # pylint: disable=g-import-not-at-top
+    from tpu_info import registry
+    return registry.MetricRegistry().get_all_metric_names()
+  if name == "METRIC_FILTER_SCHEMA":
+    # pytype: disable=import-error
+    # pylint: disable=g-import-not-at-top
+    from tpu_info import registry
+    return registry.MetricRegistry().get_all_filter_schemas()
+  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 ORBAX_PROMETHEUS_DEFAULT_PORT = 9431

@@ -342,41 +342,21 @@ def fetch_metric_tables(
     count: int,
 ) -> list[console.RenderableType]:
   """Returns a list of metric tables."""
+  from tpu_info.registry import MetricRegistry  # pylint: disable=g-import-not-at-top
+
   renderables: list[console.RenderableType] = []
-
-  orbax_metrics = []
-  pygrain_metrics = []
+  prom_metrics = []
   other_metrics = []
-
   for metric in validated_metrics:
-    metric_name, _ = metric
-    if metric_name in metrics.ORBAX_SHORT_TO_LONG_MAP:
-      orbax_metrics.append(metric_name)
-    elif metric_name in metrics.PYGRAIN_SHORT_TO_LONG_MAP:
-      pygrain_metrics.append(metric_name)
+    desc = MetricRegistry().get_descriptor(metric[0])
+    if desc and desc.group in ("orbax", "pygrain"):
+      prom_metrics.append(metric)
     else:
       other_metrics.append(metric)
 
-  if orbax_metrics:
+  if prom_metrics:
     renderables.extend(
-        _fetch_prometheus_metrics_batch(
-            orbax_metrics,
-            "Orbax",
-            metrics.ORBAX_PROMETHEUS_DEFAULT_PORT,
-            "ORBAX_PROMETHEUS_PORT",
-            "ENABLE_ORBAX_PROMETHEUS_TELEMETRY=true",
-        )
-    )
-
-  if pygrain_metrics:
-    renderables.extend(
-        _fetch_prometheus_metrics_batch(
-            pygrain_metrics,
-            "Pygrain",
-            metrics.PYGRAIN_PROMETHEUS_DEFAULT_PORT,
-            "PYGRAIN_PROMETHEUS_PORT",
-            "ENABLE_PYGRAIN_PROMETHEUS_TELEMETRY=true",
-        )
+        MetricRegistry().render_metrics(prom_metrics, chip_type, count)
     )
 
   for metric in other_metrics:
@@ -393,68 +373,17 @@ def _fetch_prometheus_metrics_batch(
     env_var_name: str,
 ) -> list[console.RenderableType]:
   """Scrapes Prometheus once and renders tables for a batch of metrics."""
-  port_str = os.environ.get(port_env_var)
-  if port_str:
-    try:
-      port = int(port_str)
-    except ValueError:
-      port = default_port
-  else:
-    port = default_port
-
-  try:
-    all_metrics = metrics.scrape_prometheus(port)
-  except metrics.PrometheusConnectionError:
-    warning_message = (
-        f"Could not connect to {telemetry_name} Prometheus server on port"
-        f" {port}.\nEnsure your workload is running with"
-        f" [bold]{env_var_name}[/bold] environment variable."
-    )
-    return [
-        panel.Panel(
-            warning_message,
-            title=(
-                f"[bold yellow]{telemetry_name} Telemetry Offline[/bold yellow]"
-            ),
-            border_style="yellow",
-        )
-    ]
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    return [
-        panel.Panel(
-            text.Text(f"Error fetching metrics: {e!r}"),
-            title="[bold red]Error[/bold red]",
-            border_style="red",
-        )
-    ]
-
-  renderables = []
-  missing_metrics = []
-  consolidate_warnings = len(metric_names) > 1
-
-  for metric_name in metric_names:
-    tables = get_prometheus_metric_table_from_families(
-        all_metrics,
-        metric_name,
-        telemetry_name,
-        skip_if_missing=consolidate_warnings,
-    )
-    if not tables and consolidate_warnings:
-      missing_metrics.append(metric_name)
-    else:
-      renderables.extend(tables)
-
-  if missing_metrics:
-    missing_list = "\n".join(f"- {m}" for m in missing_metrics)
-    warning_panel = panel.Panel(
-        "The following metrics were not found on the Prometheus server (they"
-        f" may not have been recorded yet):\n{missing_list}",
-        title=f"[bold yellow]{telemetry_name} Metrics Not Found[/bold yellow]",
-        border_style="yellow",
-    )
-    renderables.append(warning_panel)
-
-  return renderables
+  from tpu_info.registry import MetricRegistry  # pylint: disable=g-import-not-at-top
+  chip_type, count = device.get_local_chips()
+  return MetricRegistry()._batch_scrape_prometheus(
+      [(m, None) for m in metric_names],
+      telemetry_name,
+      default_port,
+      port_env_var,
+      env_var_name,
+      chip_type,
+      count,
+  )
 
 
 def get_metric_table(
@@ -463,46 +392,9 @@ def get_metric_table(
     count: int,
 ) -> list[console.RenderableType]:
   """Returns a table with the given metric info."""
-  metric_name, filters = metric
-  if (
-      metric_name in metrics.ORBAX_SHORT_TO_LONG_MAP
-      or metric_name in metrics.PYGRAIN_SHORT_TO_LONG_MAP
-  ):
-    return get_prometheus_metric_table(metric_name)
+  from tpu_info.registry import MetricRegistry  # pylint: disable=g-import-not-at-top
+  return MetricRegistry().render_metrics([metric], chip_type, count)
 
-  transfer_latency_function = lambda: [
-      TransferLatencyTables().render(metric_name, filters)
-  ]
-  metric_functions = {
-      "hbm_usage": lambda: get_hbm_usage_table(chip_type, count),
-      "duty_cycle_percent": lambda: get_duty_cycle_table(chip_type, count),
-      "tensorcore_utilization": lambda: [
-          TensorCoreUtilizationTable().render(count)
-      ],
-      "runtime_hbm_utilization": lambda: get_runtime_hbm_utilization_table(
-          chip_type, count
-      ),
-      "tensorcore_idle_duration": lambda: get_tensorcore_idle_duration_table(
-          chip_type, count
-      ),
-      "hlo_queue_size": lambda: get_hlo_queue_size_table(chip_type, count),
-      "hlo_exec_timing": lambda: get_hlo_exec_timing_table(chip_type, count),
-      "buffer_transfer_latency": transfer_latency_function,
-      "inbound_buffer_transfer_latency": transfer_latency_function,
-      "host_to_device_transfer_latency": transfer_latency_function,
-      "device_to_host_transfer_latency": transfer_latency_function,
-      "collective_e2e_latency": transfer_latency_function,
-      "host_compute_latency": transfer_latency_function,
-      "grpc_tcp_min_rtt": transfer_latency_function,
-      "grpc_tcp_delivery_rate": transfer_latency_function,
-      "core_state": get_tpuz_core_state,
-      "sequencer_state": get_tpuz_sequencer_state,
-      "sequencer_state_detailed": lambda: get_tpuz_sequencer_state(
-          detailed_info=True
-      ),
-      "queued_programs": get_tpuz_queued_programs,
-  }
-  return metric_functions[metric_name]()
 
 
 def get_tpuz_core_state() -> list[console.RenderableType]:
