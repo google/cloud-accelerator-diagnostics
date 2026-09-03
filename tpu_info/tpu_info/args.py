@@ -83,8 +83,16 @@ def parse_arguments():
   )
   parser.add_argument(
       "--streaming",
+      dest="streaming",
       action="store_true",
+      default=False,
       help="Enable streaming mode to refresh metrics continuously",
+  )
+  parser.add_argument(
+      "--no-streaming",
+      dest="streaming",
+      action="store_false",
+      help="Disable streaming mode",
   )
   parser.add_argument(
       "--rate",
@@ -96,16 +104,27 @@ def parse_arguments():
       ),
   )
   parser.add_argument(
+      "--list-metrics",
       "--list_metrics",
+      dest="list_metrics",
       action="store_true",
       help="List all supported metrics for metric flag.",
+  )
+  parser.add_argument(
+      "-g",
+      "--group",
+      action="append",
+      help=(
+          "Metric namespace group to display (runtime, execution, network,"
+          " orbax, pygrain). Can be specified multiple times."
+      ),
   )
   parser.add_argument(
       "--metric",
       action=_MetricAndFilterAction,
       help=(
           "Metric to display. Can be specified multiple times. Use"
-          " --list_metrics to see all supported metrics."
+          " --list-metrics to see all supported metrics."
       ),
   )
   parser.add_argument(

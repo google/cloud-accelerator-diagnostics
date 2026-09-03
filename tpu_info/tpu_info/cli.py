@@ -119,17 +119,22 @@ def print_chip_info():
     return
 
   if cli_args.list_metrics:
-    # Sort metrics for consistency.
-    console_obj.print(
-        panel.Panel(
-            "\n".join(
-                f"\t{metric}"
-                for metric in sorted(metrics.VALID_METRICS)
-            ),
-            title="[b]Supported Metrics[/b]",
-            title_align="left",
-        ),
+    from tpu_info.registry import MetricRegistry  # pylint: disable=g-import-not-at-top
+    from rich.tree import Tree  # pylint: disable=g-import-not-at-top
+
+    registry = MetricRegistry()
+    root_tree = Tree(
+        "[bold]Supported Telemetry Metrics[/bold]", guide_style="cyan"
     )
+    for group in registry.get_all_groups():
+      descriptors = registry.get_descriptors_by_group(group)
+      group_node = root_tree.add(
+          f"[bold green]{group}[/bold green] ([yellow]{len(descriptors)}"
+          " metrics[/yellow])"
+      )
+      for desc in sorted(descriptors, key=lambda d: d.name):
+        group_node.add(f"[cyan]{desc.name}[/cyan]: {desc.description}")
+    console_obj.print(root_tree)
     return
 
   chip_type, count = device.get_local_chips()
@@ -142,10 +147,27 @@ def print_chip_info():
     console_obj.print(table)
     return
 
-  if cli_args.metric:
+  group_arg = getattr(cli_args, "group", None)
+  if cli_args.metric or group_arg:
     try:
+      metric_requests = list(cli_args.metric) if cli_args.metric else []
+      if group_arg:
+        from tpu_info.registry import MetricRegistry  # pylint: disable=g-import-not-at-top
+
+        registry = MetricRegistry()
+        for g in group_arg:
+          if g not in registry.get_all_groups():
+            raise args_helper.MetricParsingError(
+                f"ERROR: Invalid group '{g}'. Supported groups:"
+                f" {', '.join(registry.get_all_groups())}"
+            )
+          for desc in sorted(
+              registry.get_descriptors_by_group(g), key=lambda d: d.name
+          ):
+            if not any(m.name == desc.name for m in metric_requests):
+              metric_requests.append(args.MetricRequest(name=desc.name))
       validated_metrics = args_helper.MetricsParser.parse_metric_args(
-          cli_args.metric
+          metric_requests
       )
       renderables = cli_helper.fetch_metric_tables(
           validated_metrics, chip_type, count
