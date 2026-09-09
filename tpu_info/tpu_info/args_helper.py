@@ -38,6 +38,9 @@ def _parse_filter_str(filter_str: str) -> dict[str, Any]:
 
   Returns:
     A dictionary representing the parsed filter.
+
+  Raises:
+    MetricParsingError: If filter string is malformed or has invalid syntax.
   """
   parsed_filter = {}
   # This regex splits the string by commas, but ignores commas that are inside
@@ -45,19 +48,34 @@ def _parse_filter_str(filter_str: str) -> dict[str, Any]:
   # comma is not followed by a sequence of non-'[' characters and then a ']'.
   pairs = re.split(r",(?![^[]*\])", filter_str)
   for pair in pairs:
+    pair = pair.strip()
+    if not pair:
+      continue
     if ":" not in pair:
       raise MetricParsingError(f"Invalid filter pair: {pair}")
     key, value = [p.strip() for p in pair.split(":", 1)]
     if not key:
       raise MetricParsingError("Filter key cannot be empty.")
+    if not value:
+      raise MetricParsingError(f"Filter value for key '{key}' cannot be empty.")
 
     # Handle list values (e.g., [p50,p90])
-    if value.startswith("[") and value.endswith("]"):
-      parsed_filter[key] = [v.strip() for v in value[1:-1].split(",")]
-    elif value.startswith("[") and not value.endswith("]"):
-      raise MetricParsingError(f"Unbalanced brackets in filter: {value}")
+    has_open = "[" in value
+    has_close = "]" in value
+    if has_open or has_close:
+      if (
+          not (value.startswith("[") and value.endswith("]"))
+          or value.count("[") != 1
+          or value.count("]") != 1
+      ):
+        raise MetricParsingError(f"Unbalanced brackets in filter: {value}")
+      parsed_filter[key] = [
+          v.strip() for v in value[1:-1].split(",") if v.strip()
+      ]
     else:
       parsed_filter[key] = value
+  if not parsed_filter:
+    raise MetricParsingError("Filter string cannot be empty.")
   return parsed_filter
 
 

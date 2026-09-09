@@ -16,6 +16,7 @@
 
 from collections.abc import Callable
 import dataclasses
+import enum
 import importlib
 import os
 import sys
@@ -26,6 +27,35 @@ from tpu_info import device
 from rich import console
 from rich import panel
 from rich import text
+
+
+def _to_json_serializable(obj: Any) -> Any:
+  """Recursively converts objects to JSON-serializable structures.
+
+  Handles namedtuples (via _asdict), dataclasses, enums, lists, tuples, sets,
+  dicts, and primitive types.
+
+  Args:
+    obj: Any object or nested data structure to convert.
+
+  Returns:
+    A JSON-serializable structure containing standard Python dicts, lists, and
+    primitives.
+  """
+  if isinstance(obj, enum.Enum) and not isinstance(obj, type):
+    return _to_json_serializable(obj.value)
+  if hasattr(obj, "_asdict") and not isinstance(obj, type):
+    return {k: _to_json_serializable(v) for k, v in obj._asdict().items()}
+  if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+    return {
+        k: _to_json_serializable(v)
+        for k, v in dataclasses.asdict(obj).items()
+    }
+  if isinstance(obj, (list, tuple, set)):
+    return [_to_json_serializable(x) for x in obj]
+  if isinstance(obj, dict):
+    return {k: _to_json_serializable(v) for k, v in obj.items()}
+  return obj
 
 
 @dataclasses.dataclass
@@ -40,6 +70,8 @@ class MetricDescriptor:
       into Rich renderables.
     allowed_filters: Optional set of supported filter key names accepted by the
       metric handler.
+    raw_handler: Optional callable handler that returns raw data structures for
+      JSON and CSV serialization.
   """
 
   name: str
@@ -47,6 +79,7 @@ class MetricDescriptor:
   description: str
   handler: Callable[..., list[console.RenderableType]]
   allowed_filters: set[str] | None = None
+  raw_handler: Callable[..., Any] | None = None
 
 
 class MetricRegistry:
@@ -117,6 +150,7 @@ class MetricRegistry:
       group: str,
       description: str,
       allowed_filters: set[str] | None = None,
+      raw_handler: Callable[..., Any] | None = None,
   ) -> Callable[
       [Callable[..., list[console.RenderableType]]],
       Callable[..., list[console.RenderableType]],
@@ -129,6 +163,7 @@ class MetricRegistry:
       description: Human-readable summary describing the metric.
       allowed_filters: Optional set of allowed filter parameter names accepted
         by the metric handler.
+      raw_handler: Optional handler for retrieving raw metric data structures.
 
     Returns:
       A decorator function that takes the metric handler, registers it as a
@@ -144,8 +179,10 @@ class MetricRegistry:
           description=description,
           handler=handler,
           allowed_filters=allowed_filters,
+          raw_handler=raw_handler,
       )
-      self._descriptors[name] = descriptor
+      with self._lock:
+        self._descriptors[name] = descriptor
       return handler
 
     return decorator
@@ -161,7 +198,8 @@ class MetricRegistry:
       metric is not registered.
     """
     self._ensure_providers_loaded()
-    return self._descriptors.get(name)
+    with self._lock:
+      return self._descriptors.get(name)
 
   def get_all_descriptors(self) -> dict[str, MetricDescriptor]:
     """Returns a shallow copy of all registered metric descriptors.
@@ -171,7 +209,8 @@ class MetricRegistry:
       MetricDescriptor instances.
     """
     self._ensure_providers_loaded()
-    return dict(self._descriptors)
+    with self._lock:
+      return dict(self._descriptors)
 
   def get_all_metric_names(self) -> frozenset[str]:
     """Returns the names of all registered metrics.
@@ -180,7 +219,8 @@ class MetricRegistry:
       An immutable frozenset containing all registered metric name strings.
     """
     self._ensure_providers_loaded()
-    return frozenset(self._descriptors.keys())
+    with self._lock:
+      return frozenset(self._descriptors.keys())
 
   def get_all_filter_schemas(self) -> dict[str, set[str]]:
     """Returns filter schemas for all metrics that support filtering.
@@ -190,11 +230,12 @@ class MetricRegistry:
       names for each metric that defines filter schemas.
     """
     self._ensure_providers_loaded()
-    return {
-        d.name: d.allowed_filters
-        for d in self._descriptors.values()
-        if d.allowed_filters is not None
-    }
+    with self._lock:
+      return {
+          d.name: d.allowed_filters
+          for d in self._descriptors.values()
+          if d.allowed_filters is not None
+      }
 
   def get_descriptors_by_group(self, group: str) -> list[MetricDescriptor]:
     """Retrieves all metric descriptors belonging to a specific group.
@@ -207,7 +248,8 @@ class MetricRegistry:
       A list of MetricDescriptor instances registered under the given group.
     """
     self._ensure_providers_loaded()
-    return [d for d in self._descriptors.values() if d.group == group]
+    with self._lock:
+      return [d for d in self._descriptors.values() if d.group == group]
 
   def get_all_groups(self) -> list[str]:
     """Returns a sorted list of all unique metric group names registered.
@@ -216,7 +258,8 @@ class MetricRegistry:
       A sorted list of unique group name strings in alphabetical order.
     """
     self._ensure_providers_loaded()
-    return sorted(list(set(d.group for d in self._descriptors.values())))
+    with self._lock:
+      return sorted(list(set(d.group for d in self._descriptors.values())))
 
   def _batch_scrape_prometheus(
       self,
@@ -433,12 +476,93 @@ class MetricRegistry:
 
     return renderables
 
+  def get_raw_metric(
+      self,
+      name: str,
+      chip_type: Any,
+      count: int,
+      filters: dict[str, Any] | None = None,
+  ) -> Any:
+    """Retrieves raw metric data as JSON-serializable structures.
+
+    Args:
+      name: Unique identifier of the metric to retrieve.
+      chip_type: The TPU chip architecture type (e.g. TPU v4, v5e) or None.
+      count: The number of TPU chips or cores present on the host.
+      filters: Optional dictionary of metric filter key-value pairs.
+
+    Returns:
+      A JSON-serializable data structure (such as a list of dicts) containing
+      the raw metric measurements.
+
+    Raises:
+      ValueError: If the requested metric name is not registered.
+      NotImplementedError: If the metric does not support raw data collection.
+    """
+    self._ensure_providers_loaded()
+    desc = self.get_descriptor(name)
+    if not desc:
+      raise ValueError(f"Unknown metric: {name}")
+
+    if desc.raw_handler:
+      raw_data = desc.raw_handler(
+          chip_type=chip_type, count=count, filters=filters
+      )
+      return _to_json_serializable(raw_data)
+
+    if desc.group in ("orbax", "pygrain"):
+      from tpu_info import metrics as tpu_metrics_mod  # pylint: disable=g-import-not-at-top
+
+      port = (
+          tpu_metrics_mod.ORBAX_PROMETHEUS_DEFAULT_PORT
+          if desc.group == "orbax"
+          else tpu_metrics_mod.PYGRAIN_PROMETHEUS_DEFAULT_PORT
+      )
+      port_env = (
+          "ORBAX_PROMETHEUS_PORT"
+          if desc.group == "orbax"
+          else "PYGRAIN_PROMETHEUS_PORT"
+      )
+      port_str = os.environ.get(port_env)
+      if port_str:
+        try:
+          port = int(port_str)
+        except ValueError:
+          pass
+      all_metrics = tpu_metrics_mod.scrape_prometheus(port)
+      prom_path = tpu_metrics_mod.ORBAX_SHORT_TO_LONG_MAP.get(
+          name
+      ) or tpu_metrics_mod.PYGRAIN_SHORT_TO_LONG_MAP.get(name)
+      if not prom_path:
+        return []
+      # Format of prom path is e.g. "/jax/orbax/write/gbytes"
+      # scraped names replace "/" with "_" and strip leading/trailing,
+      # so it becomes "jax_orbax_write_gbytes"
+      prom_name = prom_path.strip("/").replace("/", "_")
+      for m in all_metrics:
+        if m.name == prom_name:
+          return [
+              {
+                  "name": s.name,
+                  "labels": s.labels,
+                  "value": s.value,
+                  "timestamp": s.timestamp,
+              }
+              for s in m.samples
+          ]
+      return []
+
+    raise NotImplementedError(
+        f"Raw data collection not implemented for metric '{name}'"
+    )
+
 
 def register_metric(
     name: str,
     group: str,
     description: str,
     allowed_filters: set[str] | None = None,
+    raw_handler: Callable[..., Any] | None = None,
 ) -> Callable[
     [Callable[..., list[console.RenderableType]]],
     Callable[..., list[console.RenderableType]],
@@ -451,11 +575,12 @@ def register_metric(
     description: Human-readable summary describing the metric.
     allowed_filters: Optional set of allowed filter parameter names accepted by
       the metric handler.
+    raw_handler: Optional handler for retrieving raw metric data structures.
 
   Returns:
     A decorator function that registers the handler with the MetricRegistry
     singleton and returns the original handler function.
   """
   return MetricRegistry().register(
-      name, group, description, allowed_filters
+      name, group, description, allowed_filters, raw_handler
   )

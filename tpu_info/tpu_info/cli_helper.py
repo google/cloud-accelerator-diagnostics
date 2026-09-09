@@ -16,8 +16,11 @@
 
 import collections
 from collections.abc import Sequence
+import csv
 import datetime
 import importlib.metadata
+import io
+import json
 import multiprocessing
 import os
 import re
@@ -774,7 +777,6 @@ def get_runtime_hbm_utilization_table(
     count: int,
 ) -> list[console.RenderableType]:
   """Returns a table with the runtime HBM utilization info."""
-  del chip_type  # Unused.
   table = render_empty_table_with_columns(
       "TPU Runtime HBM Utilization", ["Device", "Utilization (%)"]
   )
@@ -789,7 +791,6 @@ def get_runtime_hbm_utilization_table(
         text.Text(exception_message, style="red"),
         title="[b]HBM BW Util Error[/b]",
         border_style="red",
-        box=box.ASCII,
     )
     renderables.append(exception_renderable)
     for device_id in range(count):
@@ -804,7 +805,6 @@ def get_tensorcore_idle_duration_table(
     count: int,
 ) -> list[console.RenderableType]:
   """Returns a table with the TensorCore idle duration info."""
-  del chip_type  # Unused.
   table = render_empty_table_with_columns(
       "TPU TensorCore Idle Duration", ["Device", "Idle Duration (s)"]
   )
@@ -819,7 +819,6 @@ def get_tensorcore_idle_duration_table(
         text.Text(exception_message, style="red"),
         title="[b]TensorCore Idle Duration Error[/b]",
         border_style="red",
-        box=box.ASCII,
     )
     renderables.append(exception_renderable)
     for device_id in range(count):
@@ -1492,38 +1491,18 @@ def get_prometheus_metric_table(
   )
 
 
-def fetch_accelerator_topology(
-    chip_type: device.TpuChip | None = None,
-    count: int | None = None,
-) -> str:
-  """Returns the accelerator topology of the current TPU.
-
-  Args:
-    chip_type: Optional TPU chip enum.
-    count: Optional count of chips.
-
-  Returns:
-    A string formatted as '{count}x{chip_name}' or 'N/A'.
-  """
+def fetch_accelerator_topology() -> str:
+  """Returns the accelerator topology of the current TPU."""
   if "TPU_CHIPS_PER_HOST_BOUNDS" in os.environ:
     return os.environ["TPU_CHIPS_PER_HOST_BOUNDS"]
-  if chip_type is None or count is None:
-    chip_type, count = device.get_local_chips()
+  chip_type, count = device.get_local_chips()
   if chip_type is None or count == 0:
     return "N/A"
   return f"{count}x{chip_type.value.name}"
 
 
 def ascii_bar_gauge(percentage: float, width: int = 10) -> str:
-  """Generates an ASCII bar gauge. E.g. [|||||.....].
-
-  Args:
-    percentage: The completion percentage (0.0 to 100.0).
-    width: The total character width of the bar (default 10).
-
-  Returns:
-    A string representing the ASCII bar gauge.
-  """
+  """Generates an ASCII bar gauge. E.g. [|||||.....]."""
   if percentage < 0:
     percentage = 0.0
   elif percentage > 100:
@@ -1540,7 +1519,7 @@ def fetch_consolidated_device_status(
 
   Args:
     chip_type: The TPU chip type.
-    count: The number of TPU devices.
+    count: The number of chips to query.
 
   Returns:
     A tuple of (list of status dicts, error_message if any).
@@ -1557,7 +1536,7 @@ def fetch_consolidated_device_status(
         error_msg = str(device_usage.renderable)
     else:
       error_msg = "Failed to fetch device usage."
-    error_msg = re.sub(r"\[\/?[^\]]+\]", "", error_msg)
+    error_msg = re.sub(r"\[\/?[a-zA-Z= ]+\]", "", error_msg)
     for i in range(count):
       status_list.append({
           "device_id": i,
@@ -1604,31 +1583,35 @@ def render_consolidated_device_status_table(
   table.add_column("TensorCore Duty Cycle")
 
   for status in status_list:
-    dev_id = str(status.get("device_id", ""))
+    dev_id = str(status["device_id"])
 
-    memory_used = status.get("memory_used")
-    memory_total = status.get("memory_total")
     if (
-        memory_used is not None
-        and memory_total is not None
-        and memory_used >= 0
-        and memory_total > 0
+        isinstance(status.get("memory_used"), int)
+        and isinstance(status.get("memory_total"), int)
+        and status["memory_total"] > 0
+        and status["memory_used"] >= 0
     ):
-      used_gib = _bytes_to_gib(memory_used)
-      total_gib = _bytes_to_gib(memory_total)
+      used_gib = _bytes_to_gib(status["memory_used"])
+      total_gib = _bytes_to_gib(status["memory_total"])
       mem_str = f"{used_gib:.2f} GiB / {total_gib:.2f} GiB"
-      mem_pct = (memory_used / memory_total) * 100.0
+      mem_pct = (status["memory_used"] / status["memory_total"]) * 100.0
       mem_gauge = ascii_bar_gauge(mem_pct)
     else:
       mem_str = "N/A"
       mem_gauge = "[..........] N/A"
 
-    if status.get("hbm_bw_util") is not None:
+    if (
+        isinstance(status.get("hbm_bw_util"), (int, float))
+        and status["hbm_bw_util"] >= 0
+    ):
       bw_gauge = ascii_bar_gauge(status["hbm_bw_util"])
     else:
       bw_gauge = "[..........] N/A"
 
-    if status.get("duty_cycle") is not None:
+    if (
+        isinstance(status.get("duty_cycle"), (int, float))
+        and status["duty_cycle"] >= 0
+    ):
       dc_gauge = ascii_bar_gauge(status["duty_cycle"])
     else:
       dc_gauge = "[..........] N/A"
@@ -1700,20 +1683,14 @@ def render_process_monitor_table(
 
   dev_mem_map = {}
   for status in status_list:
-    dev_id = status.get("device_id")
-    if dev_id is None:
-      continue
-    memory_used = status.get("memory_used")
-    if memory_used is not None and memory_used >= 0:
-      used_gib = _bytes_to_gib(memory_used)
-      dev_mem_map[dev_id] = f"{used_gib:.2f} GiB"
+    if status["memory_used"] is not None:
+      used_gib = _bytes_to_gib(status["memory_used"])
+      dev_mem_map[status["device_id"]] = f"{used_gib:.2f} GiB"
     else:
-      dev_mem_map[dev_id] = "N/A"
+      dev_mem_map[status["device_id"]] = "N/A"
 
   for status in status_list:
-    dev_id = status.get("device_id")
-    if dev_id is None:
-      continue
+    dev_id = status["device_id"]
     pid, path_used = get_owner_for_device(dev_id, chip_type, chips, chip_owners)
 
     if pid is not None:
@@ -1742,17 +1719,8 @@ def render_dashboard_header(
     refresh_rate: float | None = None,
     box_style: Any = box.ASCII,
 ) -> rich_table.Table:
-  """Renders the dashboard header (Zone 1).
-
-  Args:
-    chip_type: The TPU chip type.
-    count: The number of TPU devices.
-    refresh_rate: Optional refresh rate in seconds for streaming mode.
-    box_style: Rich box border style to use.
-
-  Returns:
-    A Rich Table object representing Zone 1 header.
-  """
+  """Renders the dashboard header (Zone 1)."""
+  del chip_type, count
   header_table = rich_table.Table(
       show_header=False,
       box=box_style,
@@ -1763,7 +1731,7 @@ def render_dashboard_header(
 
   tpu_info_ver = fetch_cli_version()
   libtpu_ver = fetch_libtpu_version()
-  topo = fetch_accelerator_topology(chip_type, count)
+  topo = fetch_accelerator_topology()
 
   utc_time = datetime.datetime.now(datetime.timezone.utc)
   timestamp_str = utc_time.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -1793,17 +1761,7 @@ def get_dashboard(
     refresh_rate: float | None = None,
     box_style: Any = box.ASCII,
 ) -> console.RenderableType:
-  """Generates the complete 3-zone dashboard.
-
-  Args:
-    chip_type: The TPU chip type.
-    count: The number of TPU devices.
-    refresh_rate: Optional refresh rate in seconds for streaming mode.
-    box_style: Rich box border style to use.
-
-  Returns:
-    A Rich Console Renderable (Group) containing all 3 zones.
-  """
+  """Generates the complete 3-zone dashboard."""
   header = render_dashboard_header(chip_type, count, refresh_rate, box_style)
   status_list, error_msg = fetch_consolidated_device_status(chip_type, count)
 
@@ -1813,7 +1771,6 @@ def get_dashboard(
         text.Text(error_msg, style="yellow"),
         title="[bold yellow]Telemetry Warning[/bold yellow]",
         border_style="yellow",
-        box=box_style,
     )
 
   device_status_table = render_consolidated_device_status_table(
@@ -1831,4 +1788,349 @@ def get_dashboard(
 
   return console.Group(*renderables)
 
+
+def fetch_topo_table() -> rich_table.Table:
+  """Returns a table with PCI/IOMMU mappings."""
+  table = rich_table.Table(
+      title="TPU Topology & PCI/IOMMU Mappings",
+      title_justify="left",
+      box=box.ASCII,
+  )
+  table.add_column("PCI Address (Full)")
+  table.add_column("PCI Base Address")
+  table.add_column("Core Index")
+  table.add_column("Device ID")
+  table.add_column("VFIO Path (IOMMU)")
+
+  chips = device.get_chips()
+  for chip in chips:
+    for _, core in sorted(chip.cores.items()):
+      table.add_row(
+          core.full_addr,
+          chip.base_addr,
+          str(core.core_index),
+          core.device_id,
+          core.vfio_path,
+      )
+  return table
+
+
+def table_to_raw_data(
+    table: rich_table.Table,
+) -> tuple[list[str], list[list[str]]]:
+  """Extracts raw string data from a Rich Table."""
+  headers = []
+  for col in table.columns:
+    header_str = ""
+    if isinstance(col.header, str):
+      header_str = col.header
+    elif hasattr(col.header, "plain"):
+      header_str = col.header.plain
+    else:
+      header_str = str(col.header) if col.header else ""
+    headers.append(header_str.strip())
+
+  rows = []
+  num_rows = len(table.rows)
+  for i in range(num_rows):
+    row_cells = []
+    for col in table.columns:
+      cell = col._cells[i]  # pylint: disable=protected-access
+      cell_str = ""
+      if isinstance(cell, str):
+        cell_str = cell
+      elif hasattr(cell, "plain"):
+        cell_str = cell.plain
+      else:
+        cell_str = str(cell) if cell else ""
+      row_cells.append(cell_str.strip())
+    rows.append(row_cells)
+
+  return headers, rows
+
+
+def to_snake_case(s: str) -> str:
+  """Converts a string to snake_case, removing units and special chars."""
+  s = s.lower()
+  s = re.sub(r"\([^)]*\)", "", s)
+  s = re.sub(r"[^a-z0-9]", " ", s)
+  parts = s.split()
+  return "_".join(parts)
+
+
+def serialize_tables_to_csv(tables: list[rich_table.Table]) -> str:
+  """Serializes a list of Rich Tables to CSV format."""
+  output = io.StringIO()
+  writer = csv.writer(output)
+
+  for table in tables:
+    headers, rows = table_to_raw_data(table)
+    if len(tables) > 1 and table.title:
+      writer.writerow([f"# Table: {table.title}"])
+    writer.writerow(headers)
+    for row in rows:
+      writer.writerow(row)
+    if len(tables) > 1:
+      writer.writerow([])
+
+  return output.getvalue()
+
+
+def serialize_tables_to_json(tables: list[rich_table.Table]) -> str:
+  """Serializes a list of Rich Tables to JSON format."""
+  data = collections.defaultdict(list)
+  for table in tables:
+    title_key = to_snake_case(str(table.title)) if table.title else "data"
+    headers, rows = table_to_raw_data(table)
+
+    table_data = []
+    for row in rows:
+      row_dict = {}
+      for header, cell in zip(headers, row):
+        header_key = to_snake_case(header)
+        row_dict[header_key] = cell
+      table_data.append(row_dict)
+
+    data[title_key].append(table_data)
+
+  result = {}
+  for key, table_list in data.items():
+    if len(table_list) == 1:
+      result[key] = table_list[0]
+    else:
+      result[key] = table_list
+
+  return json.dumps(result, indent=2)
+
+
+def serialize_dashboard_to_json(
+    status_list: list[dict[str, Any]],
+    chip_type: device.TpuChip,
+    count: int,
+) -> str:
+  """Serializes dashboard raw data to JSON."""
+  del count
+  tpu_info_ver = fetch_cli_version()
+  libtpu_ver = fetch_libtpu_version()
+  topo = fetch_accelerator_topology()
+  utc_time = datetime.datetime.now(datetime.timezone.utc)
+  timestamp_str = utc_time.isoformat()
+
+  chip_owners = device.get_chip_owners()
+  chips = device.get_chips()
+
+  devices_data = []
+  for status in status_list:
+    dev_id = status["device_id"]
+    pid, path_used = get_owner_for_device(dev_id, chip_type, chips, chip_owners)
+    proc_name = get_process_name(pid) if pid else None
+
+    device_entry = {
+        "device_id": dev_id,
+        "device_path": path_used,
+        "memory_used_bytes": status["memory_used"],
+        "memory_total_bytes": status["memory_total"],
+        "duty_cycle_pct": status["duty_cycle"],
+        "hbm_bandwidth_util_pct": status["hbm_bw_util"],
+    }
+    if pid:
+      device_entry["process"] = {
+          "pid": pid,
+          "name": proc_name,
+      }
+    else:
+      device_entry["process"] = None
+
+    devices_data.append(device_entry)
+
+  dashboard_data = {
+      "timestamp": timestamp_str,
+      "tpu_info_version": tpu_info_ver,
+      "libtpu_version": libtpu_ver,
+      "topology": topo,
+      "devices": devices_data,
+  }
+  return json.dumps(dashboard_data, indent=2)
+
+
+def serialize_dashboard_to_csv(
+    status_list: list[dict[str, Any]],
+    chip_type: device.TpuChip,
+) -> str:
+  """Serializes dashboard data to CSV."""
+  output = io.StringIO()
+  writer = csv.writer(output)
+
+  writer.writerow([
+      "timestamp",
+      "device_id",
+      "device_path",
+      "memory_used_bytes",
+      "memory_total_bytes",
+      "duty_cycle_pct",
+      "hbm_bandwidth_util_pct",
+      "pid",
+      "process_name",
+  ])
+
+  utc_time = datetime.datetime.now(datetime.timezone.utc)
+  timestamp_str = utc_time.isoformat()
+
+  chip_owners = device.get_chip_owners()
+  chips = device.get_chips()
+
+  for status in status_list:
+    dev_id = status["device_id"]
+    pid, path_used = get_owner_for_device(dev_id, chip_type, chips, chip_owners)
+    proc_name = get_process_name(pid) if pid else ""
+
+    writer.writerow([
+        timestamp_str,
+        dev_id,
+        path_used,
+        status["memory_used"] if status["memory_used"] is not None else "",
+        status["memory_total"] if status["memory_total"] is not None else "",
+        status["duty_cycle"] if status["duty_cycle"] is not None else "",
+        status["hbm_bw_util"] if status["hbm_bw_util"] is not None else "",
+        pid if pid is not None else "",
+        proc_name,
+    ])
+
+  return output.getvalue()
+
+
+def serialize_pmon_to_json(
+    status_list: list[dict[str, Any]],
+    chip_type: device.TpuChip,
+) -> str:
+  """Serializes process monitor data to JSON."""
+  chip_owners = device.get_chip_owners()
+  chips = device.get_chips()
+
+  pmon_data = []
+  for status in status_list:
+    dev_id = status["device_id"]
+    pid, path_used = get_owner_for_device(dev_id, chip_type, chips, chip_owners)
+    proc_name = get_process_name(pid) if pid else None
+
+    entry = {
+        "device_id": dev_id,
+        "device_path": path_used,
+        "pid": pid,
+        "process_name": proc_name,
+        "memory_used_bytes": status["memory_used"],
+    }
+    pmon_data.append(entry)
+
+  return json.dumps(pmon_data, indent=2)
+
+
+def serialize_pmon_to_csv(
+    status_list: list[dict[str, Any]],
+    chip_type: device.TpuChip,
+) -> str:
+  """Serializes process monitor data to CSV."""
+  output = io.StringIO()
+  writer = csv.writer(output)
+
+  writer.writerow([
+      "device_id",
+      "device_path",
+      "pid",
+      "process_name",
+      "memory_used_bytes",
+  ])
+
+  chip_owners = device.get_chip_owners()
+  chips = device.get_chips()
+
+  for status in status_list:
+    dev_id = status["device_id"]
+    pid, path_used = get_owner_for_device(dev_id, chip_type, chips, chip_owners)
+    proc_name = get_process_name(pid) if pid else ""
+
+    writer.writerow([
+        dev_id,
+        path_used,
+        pid if pid is not None else "",
+        proc_name,
+        status["memory_used"] if status["memory_used"] is not None else "",
+    ])
+
+  return output.getvalue()
+
+
+def serialize_topo_to_json() -> str:
+  """Serializes topology data to JSON."""
+  chips = device.get_chips()
+  topo_data = []
+  for chip in chips:
+    for _, core in sorted(chip.cores.items()):
+      entry = {
+          "pci_addr_full": core.full_addr,
+          "pci_base_addr": chip.base_addr,
+          "core_index": core.core_index,
+          "device_id": core.device_id,
+          "vfio_path": core.vfio_path,
+      }
+      topo_data.append(entry)
+  return json.dumps(topo_data, indent=2)
+
+
+def serialize_topo_to_csv() -> str:
+  """Serializes topology data to CSV."""
+  output = io.StringIO()
+  writer = csv.writer(output)
+
+  writer.writerow([
+      "pci_addr_full",
+      "pci_base_addr",
+      "core_index",
+      "device_id",
+      "vfio_path",
+  ])
+
+  chips = device.get_chips()
+  for chip in chips:
+    for _, core in sorted(chip.cores.items()):
+      writer.writerow([
+          core.full_addr,
+          chip.base_addr,
+          core.core_index,
+          core.device_id,
+          core.vfio_path,
+      ])
+
+  return output.getvalue()
+
+
+def serialize_metrics_list_to_json() -> str:
+  """Serializes metrics list to JSON."""
+  from tpu_info.registry import MetricRegistry  # pylint: disable=g-import-not-at-top
+  registry = MetricRegistry()
+  data = {}
+  for group in registry.get_all_groups():
+    descriptors = registry.get_descriptors_by_group(group)
+    group_data = []
+    for desc in sorted(descriptors, key=lambda d: d.name):
+      group_data.append({
+          "name": desc.name,
+          "description": desc.description,
+      })
+    data[group] = group_data
+  return json.dumps(data, indent=2)
+
+
+def serialize_metrics_list_to_csv() -> str:
+  """Serializes metrics list to CSV."""
+  from tpu_info.registry import MetricRegistry  # pylint: disable=g-import-not-at-top
+  registry = MetricRegistry()
+  output = io.StringIO()
+  writer = csv.writer(output)
+  writer.writerow(["group", "name", "description"])
+  for group in registry.get_all_groups():
+    descriptors = registry.get_descriptors_by_group(group)
+    for desc in sorted(descriptors, key=lambda d: d.name):
+      writer.writerow([group, desc.name, desc.description])
+  return output.getvalue()
 

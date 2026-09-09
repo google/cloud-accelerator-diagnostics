@@ -23,6 +23,7 @@ MetricRegistry.
 from typing import Any
 
 from tpu_info import cli_helper
+from tpu_info import metrics
 from tpu_info.registry import register_metric
 from rich import console
 
@@ -55,6 +56,17 @@ def _create_latency_handler(metric_name: str):
     return [cli_helper.TransferLatencyTables().render(metric_name, filters)]
 
   return handler
+
+
+def _create_latency_raw_handler(metric_name: str):
+  """Creates a raw data retrieval handler function for a network latency metric."""
+
+  def raw_handler(
+      *, filters: dict[str, Any] | None = None, **_kwargs: Any
+  ) -> Any:
+    return metrics.get_transfer_latency(metric_name, filters=filters)
+
+  return raw_handler
 
 
 _NETWORK_METRICS = {
@@ -116,4 +128,5 @@ for _name, (_desc, _filters) in _NETWORK_METRICS.items():
       "network",
       _desc,
       allowed_filters=_filters,
+      raw_handler=_create_latency_raw_handler(_name),
   )(_create_latency_handler(_name))

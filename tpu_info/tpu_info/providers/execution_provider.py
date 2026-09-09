@@ -22,14 +22,95 @@ states with the central MetricRegistry.
 from typing import Any
 
 from tpu_info import cli_helper
+from tpu_info import metrics
 from tpu_info.registry import register_metric
 from rich import console
+
+
+def _hlo_queue_size_raw(chip_type: Any = None, **_kwargs: Any) -> Any:
+  """Retrieves raw HLO queue size data per TPU device."""
+  return metrics.get_hlo_queue_size(chip_type)
+
+
+def _hlo_exec_timing_raw(chip_type: Any = None, **_kwargs: Any) -> Any:
+  """Retrieves raw HLO execution timing data per TPU device."""
+  return metrics.get_hlo_exec_timing(chip_type)
+
+
+def _core_state_raw(**_kwargs: Any) -> Any:
+  """Retrieves raw TPUz core states data."""
+  core_states = metrics.get_tpuz_info(include_hlo_info=False)
+  return [
+      {
+          "chip_id": c.chip_id,
+          "global_core_id": c.global_core_id,
+          "core_type": c.core_type,
+          "xdb_server": c.xdb_server,
+      }
+      for c in core_states
+  ]
+
+
+def _sequencer_state_raw(**_kwargs: Any) -> Any:
+  """Retrieves raw TPUz sequencer states summary data."""
+  core_states = metrics.get_tpuz_info(include_hlo_info=False)
+  res = []
+  for c in core_states:
+    for s in c.sequencer_states:
+      res.append({
+          "chip_id": c.chip_id,
+          "global_core_id": c.global_core_id,
+          "program_counter": s.pc,
+          "tracemark": s.tracemark,
+          "program_id": s.program_id,
+          "run_id": s.run_id,
+          "sequence_type": s.sequencer_type,
+      })
+  return res
+
+
+def _sequencer_state_detailed_raw(**_kwargs: Any) -> Any:
+  """Retrieves raw detailed TPUz sequencer states data."""
+  core_states = metrics.get_tpuz_info(include_hlo_info=True)
+  res = []
+  for c in core_states:
+    for s in c.sequencer_states:
+      res.append({
+          "chip_id": c.chip_id,
+          "global_core_id": c.global_core_id,
+          "program_counter": s.pc,
+          "tracemark": s.tracemark,
+          "program_id": s.program_id,
+          "run_id": s.run_id,
+          "sequence_type": s.sequencer_type,
+          "core_error": c.error_message,
+          "hlo_location": s.hlo_location,
+          "hlo_details": s.hlo_detailed_info,
+      })
+  return res
+
+
+def _queued_programs_raw(**_kwargs: Any) -> Any:
+  """Retrieves raw TPUz queued programs data."""
+  core_states = metrics.get_tpuz_info(include_hlo_info=False)
+  res = []
+  for c in core_states:
+    for p in c.queued_programs:
+      res.append({
+          "chip_id": c.chip_id,
+          "global_core_id": c.global_core_id,
+          "run_id": p.run_id,
+          "launch_id": p.launch_id,
+          "program_fingerprint": p.program_fingerprint,
+      })
+  return res
 
 
 @register_metric(
     "hlo_queue_size",
     "execution",
     "HLO queue size gauge per device",
+    raw_handler=_hlo_queue_size_raw,
 )
 def _hlo_queue_size_handler(
     *, chip_type: Any = None, count: int = 0, **_kwargs: Any
@@ -53,6 +134,7 @@ def _hlo_queue_size_handler(
     "hlo_exec_timing",
     "execution",
     "HLO execution timing distribution in microseconds",
+    raw_handler=_hlo_exec_timing_raw,
 )
 def _hlo_exec_timing_handler(
     *, chip_type: Any = None, count: int = 0, **_kwargs: Any
@@ -78,6 +160,7 @@ def _hlo_exec_timing_handler(
     "core_state",
     "execution",
     "TPUz core states (Chip ID, Global Core ID, Core Type, xdb Server)",
+    raw_handler=_core_state_raw,
 )
 def _core_state_handler(**_kwargs: Any) -> list[console.RenderableType]:
   """Retrieves TPUz hardware core states table.
@@ -98,6 +181,7 @@ def _core_state_handler(**_kwargs: Any) -> list[console.RenderableType]:
     "sequencer_state",
     "execution",
     "TPUz sequencer states (PC, Tracemark, Program ID, Run ID, Sequence Type)",
+    raw_handler=_sequencer_state_raw,
 )
 def _sequencer_state_handler(**_kwargs: Any) -> list[console.RenderableType]:
   """Retrieves TPUz sequencer states summary table.
@@ -118,6 +202,7 @@ def _sequencer_state_handler(**_kwargs: Any) -> list[console.RenderableType]:
     "sequencer_state_detailed",
     "execution",
     "Detailed TPUz sequencer states including HLO location and errors",
+    raw_handler=_sequencer_state_detailed_raw,
 )
 def _sequencer_state_detailed_handler(
     **_kwargs: Any,
@@ -140,6 +225,7 @@ def _sequencer_state_detailed_handler(
     "queued_programs",
     "execution",
     "TPUz queued programs (Run ID, Launch ID, Program Fingerprint)",
+    raw_handler=_queued_programs_raw,
 )
 def _queued_programs_handler(**_kwargs: Any) -> list[console.RenderableType]:
   """Retrieves TPUz queued programs table.
