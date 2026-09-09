@@ -16,6 +16,7 @@
 
 import collections
 from collections.abc import Sequence
+import datetime
 import importlib.metadata
 import multiprocessing
 import os
@@ -316,7 +317,7 @@ def fetch_process_table(
   table = rich_table.Table(
       title="TPU Process Info",
       title_justify="left",
-      box=box.MARKDOWN,
+      box=box.ASCII,
   )
   table.add_column("Chip")
   table.add_column("PID")
@@ -394,7 +395,6 @@ def get_metric_table(
   """Returns a table with the given metric info."""
   from tpu_info.registry import MetricRegistry  # pylint: disable=g-import-not-at-top
   return MetricRegistry().render_metrics([metric], chip_type, count)
-
 
 
 def get_tpuz_core_state() -> list[console.RenderableType]:
@@ -592,7 +592,7 @@ def render_empty_table_with_columns(
   table = rich_table.Table(
       title=title,
       title_justify="left",
-      box=box.MARKDOWN,
+      box=box.ASCII,
       min_width=min_width,
   )
   for column in columns:
@@ -774,6 +774,7 @@ def get_runtime_hbm_utilization_table(
     count: int,
 ) -> list[console.RenderableType]:
   """Returns a table with the runtime HBM utilization info."""
+  del chip_type  # Unused.
   table = render_empty_table_with_columns(
       "TPU Runtime HBM Utilization", ["Device", "Utilization (%)"]
   )
@@ -788,6 +789,7 @@ def get_runtime_hbm_utilization_table(
         text.Text(exception_message, style="red"),
         title="[b]HBM BW Util Error[/b]",
         border_style="red",
+        box=box.ASCII,
     )
     renderables.append(exception_renderable)
     for device_id in range(count):
@@ -802,6 +804,7 @@ def get_tensorcore_idle_duration_table(
     count: int,
 ) -> list[console.RenderableType]:
   """Returns a table with the TensorCore idle duration info."""
+  del chip_type  # Unused.
   table = render_empty_table_with_columns(
       "TPU TensorCore Idle Duration", ["Device", "Idle Duration (s)"]
   )
@@ -816,6 +819,7 @@ def get_tensorcore_idle_duration_table(
         text.Text(exception_message, style="red"),
         title="[b]TensorCore Idle Duration Error[/b]",
         border_style="red",
+        box=box.ASCII,
     )
     renderables.append(exception_renderable)
     for device_id in range(count):
@@ -1486,3 +1490,345 @@ def get_prometheus_metric_table(
   return get_prometheus_metric_table_from_families(
       all_metrics, metric_name, telemetry_name, skip_if_missing=False
   )
+
+
+def fetch_accelerator_topology(
+    chip_type: device.TpuChip | None = None,
+    count: int | None = None,
+) -> str:
+  """Returns the accelerator topology of the current TPU.
+
+  Args:
+    chip_type: Optional TPU chip enum.
+    count: Optional count of chips.
+
+  Returns:
+    A string formatted as '{count}x{chip_name}' or 'N/A'.
+  """
+  if "TPU_CHIPS_PER_HOST_BOUNDS" in os.environ:
+    return os.environ["TPU_CHIPS_PER_HOST_BOUNDS"]
+  if chip_type is None or count is None:
+    chip_type, count = device.get_local_chips()
+  if chip_type is None or count == 0:
+    return "N/A"
+  return f"{count}x{chip_type.value.name}"
+
+
+def ascii_bar_gauge(percentage: float, width: int = 10) -> str:
+  """Generates an ASCII bar gauge. E.g. [|||||.....].
+
+  Args:
+    percentage: The completion percentage (0.0 to 100.0).
+    width: The total character width of the bar (default 10).
+
+  Returns:
+    A string representing the ASCII bar gauge.
+  """
+  if percentage < 0:
+    percentage = 0.0
+  elif percentage > 100:
+    percentage = 100.0
+  filled_len = int(round((percentage / 100.0) * width))
+  bar = "|" * filled_len + "." * (width - filled_len)
+  return f"[{bar}] {percentage:.1f}%"
+
+
+def fetch_consolidated_device_status(
+    chip_type: device.TpuChip, count: int
+) -> tuple[list[dict[str, Any]], str | None]:
+  """Value-added aggregator for device status, catching telemetry RPC errors.
+
+  Args:
+    chip_type: The TPU chip type.
+    count: The number of TPU devices.
+
+  Returns:
+    A tuple of (list of status dicts, error_message if any).
+  """
+  status_list = []
+  error_msg = None
+
+  device_usage = get_device_usage(chip_type)
+  if isinstance(device_usage, panel.Panel):
+    if hasattr(device_usage, "renderable"):
+      if hasattr(device_usage.renderable, "plain"):
+        error_msg = device_usage.renderable.plain
+      else:
+        error_msg = str(device_usage.renderable)
+    else:
+      error_msg = "Failed to fetch device usage."
+    error_msg = re.sub(r"\[\/?[^\]]+\]", "", error_msg)
+    for i in range(count):
+      status_list.append({
+          "device_id": i,
+          "memory_used": None,
+          "memory_total": None,
+          "duty_cycle": None,
+          "hbm_bw_util": None,
+      })
+  else:
+    for usage in device_usage:
+      status_list.append({
+          "device_id": usage.device_id,
+          "memory_used": usage.memory_usage,
+          "memory_total": usage.total_memory,
+          "duty_cycle": usage.duty_cycle_pct,
+          "hbm_bw_util": None,
+      })
+
+  try:
+    bw_utils = metrics.get_runtime_hbm_utilization()
+    bw_util_map = {device_id: util for device_id, util in bw_utils}
+    for status in status_list:
+      status["hbm_bw_util"] = bw_util_map.get(status["device_id"])
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+  return status_list, error_msg
+
+
+def render_consolidated_device_status_table(
+    status_list: list[dict[str, Any]],
+    box_style: Any = box.ASCII,
+) -> rich_table.Table:
+  """Renders the consolidated device status table."""
+  table = rich_table.Table(
+      title="TPU Device Status",
+      title_justify="left",
+      box=box_style,
+  )
+  table.add_column("Device ID")
+  table.add_column("Memory Usage (Used/Total)")
+  table.add_column("Memory Bar Gauge")
+  table.add_column("HBM Bandwidth Util")
+  table.add_column("TensorCore Duty Cycle")
+
+  for status in status_list:
+    dev_id = str(status.get("device_id", ""))
+
+    memory_used = status.get("memory_used")
+    memory_total = status.get("memory_total")
+    if (
+        memory_used is not None
+        and memory_total is not None
+        and memory_used >= 0
+        and memory_total > 0
+    ):
+      used_gib = _bytes_to_gib(memory_used)
+      total_gib = _bytes_to_gib(memory_total)
+      mem_str = f"{used_gib:.2f} GiB / {total_gib:.2f} GiB"
+      mem_pct = (memory_used / memory_total) * 100.0
+      mem_gauge = ascii_bar_gauge(mem_pct)
+    else:
+      mem_str = "N/A"
+      mem_gauge = "[..........] N/A"
+
+    if status.get("hbm_bw_util") is not None:
+      bw_gauge = ascii_bar_gauge(status["hbm_bw_util"])
+    else:
+      bw_gauge = "[..........] N/A"
+
+    if status.get("duty_cycle") is not None:
+      dc_gauge = ascii_bar_gauge(status["duty_cycle"])
+    else:
+      dc_gauge = "[..........] N/A"
+
+    table.add_row(
+        dev_id,
+        mem_str,
+        mem_gauge,
+        bw_gauge,
+        dc_gauge,
+    )
+
+  return table
+
+
+def get_owner_for_device(
+    device_id: int,
+    chip_type: device.TpuChip,
+    chips: list[device.ChipInfo],
+    chip_owners: dict[str, int],
+) -> tuple[int | None, str]:
+  """Finds the owner PID and path for a device ID."""
+  dev_path = device.chip_path(chip_type, device_id)
+  pid = chip_owners.get(dev_path)
+  if pid is not None:
+    return pid, dev_path
+
+  devices_per_chip = chip_type.value.devices_per_chip
+  chip_index = device_id // devices_per_chip
+  core_index = device_id % devices_per_chip
+
+  if chip_index < len(chips):
+    chip = chips[chip_index]
+    if core_index in chip.cores:
+      core = chip.cores[core_index]
+      pid = chip_owners.get(core.vfio_path)
+      if pid is not None:
+        return pid, core.vfio_path
+      pid = chip_owners.get(core.full_addr)
+      if pid is not None:
+        return pid, core.full_addr
+    for core in chip.cores.values():
+      pid = chip_owners.get(core.vfio_path)
+      if pid is not None:
+        return pid, core.vfio_path
+
+  return None, dev_path
+
+
+def render_process_monitor_table(
+    status_list: list[dict[str, Any]],
+    chip_type: device.TpuChip,
+    box_style: Any = box.ASCII,
+) -> rich_table.Table:
+  """Renders the process monitor table (Zone 3)."""
+  table = rich_table.Table(
+      title="TPU Process Monitor",
+      title_justify="left",
+      box=box_style,
+  )
+  table.add_column("Device ID")
+  table.add_column("Device Path / VFIO Path")
+  table.add_column("PID")
+  table.add_column("Process Name")
+  table.add_column("Memory Allocation")
+
+  chip_owners = device.get_chip_owners()
+  chips = device.get_chips()
+
+  dev_mem_map = {}
+  for status in status_list:
+    dev_id = status.get("device_id")
+    if dev_id is None:
+      continue
+    memory_used = status.get("memory_used")
+    if memory_used is not None and memory_used >= 0:
+      used_gib = _bytes_to_gib(memory_used)
+      dev_mem_map[dev_id] = f"{used_gib:.2f} GiB"
+    else:
+      dev_mem_map[dev_id] = "N/A"
+
+  for status in status_list:
+    dev_id = status.get("device_id")
+    if dev_id is None:
+      continue
+    pid, path_used = get_owner_for_device(dev_id, chip_type, chips, chip_owners)
+
+    if pid is not None:
+      pid_str = str(pid)
+      proc_name = get_process_name(pid) or "unknown"
+      mem_alloc = dev_mem_map.get(dev_id, "N/A")
+    else:
+      pid_str = "None"
+      proc_name = "N/A"
+      mem_alloc = "N/A"
+
+    table.add_row(
+        str(dev_id),
+        path_used,
+        pid_str,
+        proc_name,
+        mem_alloc,
+    )
+
+  return table
+
+
+def render_dashboard_header(
+    chip_type: device.TpuChip,
+    count: int,
+    refresh_rate: float | None = None,
+    box_style: Any = box.ASCII,
+) -> rich_table.Table:
+  """Renders the dashboard header (Zone 1).
+
+  Args:
+    chip_type: The TPU chip type.
+    count: The number of TPU devices.
+    refresh_rate: Optional refresh rate in seconds for streaming mode.
+    box_style: Rich box border style to use.
+
+  Returns:
+    A Rich Table object representing Zone 1 header.
+  """
+  header_table = rich_table.Table(
+      show_header=False,
+      box=box_style,
+      expand=True,
+  )
+  header_table.add_column("Left", ratio=1)
+  header_table.add_column("Right", ratio=1)
+
+  tpu_info_ver = fetch_cli_version()
+  libtpu_ver = fetch_libtpu_version()
+  topo = fetch_accelerator_topology(chip_type, count)
+
+  utc_time = datetime.datetime.now(datetime.timezone.utc)
+  timestamp_str = utc_time.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+  left_text = (
+      f"tpu-info Version: {tpu_info_ver}\n"
+      f"libtpu Version:   {libtpu_ver}\n"
+      f"TPU Topology:     {topo}"
+  )
+
+  right_text = f"Timestamp: {timestamp_str}\n"
+  if refresh_rate is not None:
+    right_text += f"Refresh Rate: {refresh_rate:.1f}s\n"
+  else:
+    right_text += "Mode: One-shot\n"
+
+  header_table.add_row(
+      align.Align.left(text.Text(left_text)),
+      align.Align.right(text.Text(right_text)),
+  )
+  return header_table
+
+
+def get_dashboard(
+    chip_type: device.TpuChip,
+    count: int,
+    refresh_rate: float | None = None,
+    box_style: Any = box.ASCII,
+) -> console.RenderableType:
+  """Generates the complete 3-zone dashboard.
+
+  Args:
+    chip_type: The TPU chip type.
+    count: The number of TPU devices.
+    refresh_rate: Optional refresh rate in seconds for streaming mode.
+    box_style: Rich box border style to use.
+
+  Returns:
+    A Rich Console Renderable (Group) containing all 3 zones.
+  """
+  header = render_dashboard_header(chip_type, count, refresh_rate, box_style)
+  status_list, error_msg = fetch_consolidated_device_status(chip_type, count)
+
+  warning_panel = None
+  if error_msg:
+    warning_panel = panel.Panel(
+        text.Text(error_msg, style="yellow"),
+        title="[bold yellow]Telemetry Warning[/bold yellow]",
+        border_style="yellow",
+        box=box_style,
+    )
+
+  device_status_table = render_consolidated_device_status_table(
+      status_list, box_style
+  )
+  process_monitor_table = render_process_monitor_table(
+      status_list, chip_type, box_style
+  )
+
+  renderables = [header]
+  if warning_panel:
+    renderables.append(warning_panel)
+  renderables.append(device_status_table)
+  renderables.append(process_monitor_table)
+
+  return console.Group(*renderables)
+
+

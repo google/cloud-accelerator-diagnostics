@@ -456,4 +456,6 @@ def register_metric(
     A decorator function that registers the handler with the MetricRegistry
     singleton and returns the original handler function.
   """
-  return MetricRegistry().register(name, group, description, allowed_filters)
+  return MetricRegistry().register(
+      name, group, description, allowed_filters
+  )

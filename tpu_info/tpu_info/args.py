@@ -16,6 +16,7 @@
 
 import argparse
 import dataclasses
+import sys
 
 
 @dataclasses.dataclass
@@ -61,8 +62,11 @@ class _MetricAndFilterAction(argparse.Action):
       last_metric.filter_str = values
 
 
-def parse_arguments():
+def parse_arguments(argv: list[str] | None = None):
   """Parses command line arguments for the tpu-info tool."""
+  if argv is None:
+    argv = sys.argv[1:]
+
   parser = argparse.ArgumentParser(
       description="Display TPU info and metrics.",
       formatter_class=argparse.RawTextHelpFormatter,
@@ -71,19 +75,16 @@ def parse_arguments():
       "-v",
       "--version",
       action="store_true",
-      help=(
-          "Displays the tpu-info version, libtpu version and accelerator type."
-      ),
+      help="Displays version info.",
   )
   parser.add_argument(
       "-p",
       "--process",
       action="store_true",
-      help="Displays the process ID and name for each TPU chip",
+      help="Displays the process ID and name for each TPU chip.",
   )
   parser.add_argument(
       "--streaming",
-      dest="streaming",
       action="store_true",
       default=False,
       help="Enable streaming mode to refresh metrics continuously",
@@ -98,43 +99,35 @@ def parse_arguments():
       "--rate",
       type=float,
       default=1.0,
-      help=(
-          "Refresh rate in seconds for streaming mode (default: 1.0; effective"
-          " when streaming is implemented)."
-      ),
+      help="Refresh rate in seconds for streaming mode.",
   )
   parser.add_argument(
       "--list-metrics",
+      action="store_true",
+      help="List all supported metrics.",
+  )
+  parser.add_argument(
       "--list_metrics",
       dest="list_metrics",
       action="store_true",
-      help="List all supported metrics for metric flag.",
+      help="List all supported metrics (legacy alias).",
   )
   parser.add_argument(
       "-g",
       "--group",
       action="append",
-      help=(
-          "Metric namespace group to display (runtime, execution, network,"
-          " orbax, pygrain). Can be specified multiple times."
-      ),
+      help="Metric namespace group to display.",
   )
   parser.add_argument(
       "--metric",
       action=_MetricAndFilterAction,
-      help=(
-          "Metric to display. Can be specified multiple times. Use"
-          " --list-metrics to see all supported metrics."
-      ),
+      help="Metric to display.",
   )
   parser.add_argument(
       "-f",
       "--filter",
       dest="metric",
       action=_MetricAndFilterAction,
-      help=(
-          "An optional filter string for the preceding --metric flag. Example:"
-          " -f 'percentile:[p50,p90], core_type:tensorcore'"
-      ),
+      help="Filter string for preceding metric.",
   )
-  return parser.parse_args()
+  return parser.parse_args(argv)

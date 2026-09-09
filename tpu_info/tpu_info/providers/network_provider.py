@@ -111,6 +111,9 @@ _NETWORK_METRICS = {
 }
 
 for _name, (_desc, _filters) in _NETWORK_METRICS.items():
-  register_metric(_name, "network", _desc, allowed_filters=_filters)(
-      _create_latency_handler(_name)
-  )
+  register_metric(
+      _name,
+      "network",
+      _desc,
+      allowed_filters=_filters,
+  )(_create_latency_handler(_name))
